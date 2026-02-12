@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python main.py:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(pip index:*)",
+      "Bash(cmake:*)",
+      "Bash(brew install:*)"
+    ]
+  }
+}
