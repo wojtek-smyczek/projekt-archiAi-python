@@ -6,7 +6,17 @@
       "Bash(pip install:*)",
       "Bash(pip index:*)",
       "Bash(cmake:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "WebSearch",
+      "WebFetch(domain:mcneel.github.io)",
+      "WebFetch(domain:developer.rhino3d.com)",
+      "WebFetch(domain:discourse.mcneel.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(source:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api:*)",
+      "Bash(curl:*)"
     ]
   }
 }

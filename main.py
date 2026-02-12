@@ -273,56 +273,188 @@ for dl, value in unmatched_pairs:
 
 print(f"Sparowano {len(wall_to_value)} ścian z wymiarami ({len(unmatched_pairs)} syntetycznych)")
 
-# Krok 4: Obliczenie globalnej skali
-scales = []
-for w_idx, value in wall_to_value.items():
-    w = walls[w_idx]
-    orient = get_orientation(w)
-    pixel_length = w['width'] if orient == 'H' else w['height']
-    if pixel_length > 0:
-        scales.append(value / pixel_length)
-
-if scales:
-    global_scale = sum(scales) / len(scales)
-    print(f"Globalna skala: {global_scale:.4f} cm/px (z {len(scales)} par)")
-else:
-    # Fallback: 1 piksel = 1 jednostka
-    global_scale = 1.0
-    print("UWAGA: Brak sparowanych wymiarów, używam skali 1:1")
-
-# Krok 5: Zapis DXF — ściany stykają się w narożnikach
+# Krok 4: Zapis DXF — pozycje ścian na podstawie dimension_value (nie pikseli)
 doc = ezdxf.new('R2010')
 msp = doc.modelspace()
 
-# Oblicz centra ścian w DXF i podziel na H/V
-h_walls = []  # (cy_dxf,)  — linie poziome
-v_walls = []  # (cx_dxf,)  — linie pionowe
+SNAP_DIST = 100  # max pikseli tolerancji dla wykrywania połączeń
 
+# Posortowane listy ścian z ich dimension_value
+v_walls_list = []
+h_walls_list = []
 for w_idx, w in enumerate(walls):
     orient = get_orientation(w)
-    cx_dxf = w['x'] * global_scale
-    cy_dxf = (img_height - w['y']) * global_scale
-    if orient == 'H':
-        h_walls.append(cy_dxf)
+    entry = {
+        'w_idx': w_idx, 'px_x': w['x'], 'px_y': w['y'],
+        'half_w': w['width'] / 2, 'half_h': w['height'] / 2,
+        'value': wall_to_value.get(w_idx),
+    }
+    if orient == 'V':
+        v_walls_list.append(entry)
     else:
-        v_walls.append(cx_dxf)
+        h_walls_list.append(entry)
 
-# Wyznacz granice prostokąta z pozycji ścian
-x_min = min(v_walls) if v_walls else 0
-x_max = max(v_walls) if v_walls else 0
-y_min = min(h_walls) if h_walls else 0
-y_max = max(h_walls) if h_walls else 0
+v_walls_list.sort(key=lambda w: w['px_x'])  # od lewej do prawej
+h_walls_list.sort(key=lambda w: w['px_y'])  # od góry do dołu (obraz)
 
-print(f"Narożniki DXF: ({x_min:.1f}, {y_min:.1f}) - ({x_max:.1f}, {y_max:.1f})")
+print(f"\nŚciany V (lewa→prawa): {[f'x={v['px_x']:.0f} val={v['value']}' for v in v_walls_list]}")
+print(f"Ściany H (góra→dół):   {[f'y={h['px_y']:.0f} val={h['value']}' for h in h_walls_list]}")
 
-# Rysuj ściany H (od lewej V do prawej V)
-for cy in h_walls:
-    msp.add_line((x_min, cy), (x_max, cy))
+# --- Funkcje do wykrywania połączeń między ścianami ---
 
-# Rysuj ściany V (od dolnej H do górnej H)
-for cx in v_walls:
-    msp.add_line((cx, y_min), (cx, y_max))
+def find_h_connecting(v_left, v_right):
+    """Znajdź ścianę H łączącą dwie ściany V (endpointy blisko obu V)."""
+    best, best_score = None, float('inf')
+    for hw in h_walls_list:
+        left_end = hw['px_x'] - hw['half_w']
+        right_end = hw['px_x'] + hw['half_w']
+        d_left = abs(left_end - v_left['px_x'])
+        d_right = abs(right_end - v_right['px_x'])
+        if d_left > SNAP_DIST or d_right > SNAP_DIST:
+            continue
+        # Sprawdź overlap Y z obiema V
+        ok = True
+        for vw in [v_left, v_right]:
+            if not (vw['px_y'] - vw['half_h'] - SNAP_DIST <= hw['px_y'] <= vw['px_y'] + vw['half_h'] + SNAP_DIST):
+                ok = False
+                break
+        if ok:
+            score = d_left + d_right
+            if score < best_score:
+                best_score = score
+                best = hw
+    return best
+
+def find_v_connecting(h_top, h_bottom):
+    """Znajdź ścianę V łączącą dwie ściany H (endpointy blisko obu H)."""
+    best, best_score = None, float('inf')
+    for vw in v_walls_list:
+        top_end = vw['px_y'] - vw['half_h']
+        bottom_end = vw['px_y'] + vw['half_h']
+        d_top = abs(top_end - h_top['px_y'])
+        d_bottom = abs(bottom_end - h_bottom['px_y'])
+        if d_top > SNAP_DIST or d_bottom > SNAP_DIST:
+            continue
+        ok = True
+        for hw in [h_top, h_bottom]:
+            if not (hw['px_x'] - hw['half_w'] - SNAP_DIST <= vw['px_x'] <= hw['px_x'] + hw['half_w'] + SNAP_DIST):
+                ok = False
+                break
+        if ok:
+            score = d_top + d_bottom
+            if score < best_score:
+                best_score = score
+                best = vw
+    return best
+
+def find_v_at_h_endpoint(hw, endpoint):
+    """Znajdź indeks ściany V najbliższej endpointowi ściany H."""
+    target_x = hw['px_x'] - hw['half_w'] if endpoint == 'left' else hw['px_x'] + hw['half_w']
+    best_vi, best_dist = None, SNAP_DIST
+    for vi, vw in enumerate(v_walls_list):
+        if not (vw['px_y'] - vw['half_h'] - SNAP_DIST <= hw['px_y'] <= vw['px_y'] + vw['half_h'] + SNAP_DIST):
+            continue
+        d = abs(vw['px_x'] - target_x)
+        if d < best_dist:
+            best_dist = d
+            best_vi = vi
+    return best_vi
+
+def find_h_at_v_endpoint(vw, endpoint):
+    """Znajdź indeks ściany H najbliższej endpointowi ściany V."""
+    target_y = vw['px_y'] - vw['half_h'] if endpoint == 'top' else vw['px_y'] + vw['half_h']
+    best_hi, best_dist = None, SNAP_DIST
+    for hi, hw in enumerate(h_walls_list):
+        if not (hw['px_x'] - hw['half_w'] - SNAP_DIST <= vw['px_x'] <= hw['px_x'] + hw['half_w'] + SNAP_DIST):
+            continue
+        d = abs(hw['px_y'] - target_y)
+        if d < best_dist:
+            best_dist = d
+            best_hi = hi
+    return best_hi
+
+# --- Pozycje X ścian V (z dimension_value ścian H) ---
+n_v = len(v_walls_list)
+v_x = [None] * n_v
+v_x[0] = 0.0  # lewa ściana V na x=0
+
+# Pass 1: kolejne pary V (użyj H wall łączącej je)
+for i in range(n_v - 1):
+    h = find_h_connecting(v_walls_list[i], v_walls_list[i + 1])
+    if h and h['value'] and h['value'] > 0:
+        v_x[i + 1] = v_x[i] + h['value']
+        print(f"  X: V[{i}]→V[{i+1}] przez H(val={h['value']}) → x={v_x[i+1]}")
+
+# Pass 2: uzupełnij luki z niekolejnych H walls
+for i in range(n_v):
+    if v_x[i] is not None:
+        continue
+    for j in range(n_v):
+        if v_x[j] is None:
+            continue
+        h = find_h_connecting(v_walls_list[min(i, j)], v_walls_list[max(i, j)])
+        if h and h['value'] and h['value'] > 0:
+            v_x[i] = v_x[j] + h['value'] if i > j else v_x[j] - h['value']
+            print(f"  X: V[{j}]→V[{i}] (uzupełnienie) H(val={h['value']}) → x={v_x[i]}")
+            break
+
+# --- Pozycje Y ścian H (z dimension_value ścian V) ---
+n_h = len(h_walls_list)
+h_y = [None] * n_h
+h_y[-1] = 0.0  # dolna ściana H na y=0
+
+# Pass 1: kolejne pary H (od dołu do góry, użyj V wall łączącej je)
+for i in range(n_h - 1, 0, -1):
+    v = find_v_connecting(h_walls_list[i - 1], h_walls_list[i])
+    if v and v['value'] and v['value'] > 0:
+        h_y[i - 1] = h_y[i] + v['value']
+        print(f"  Y: H[{i}]→H[{i-1}] przez V(val={v['value']}) → y={h_y[i-1]}")
+
+# Pass 2: uzupełnij luki z niekolejnych V walls
+for i in range(n_h):
+    if h_y[i] is not None:
+        continue
+    for j in range(n_h):
+        if h_y[j] is None:
+            continue
+        v = find_v_connecting(h_walls_list[min(i, j)], h_walls_list[max(i, j)])
+        if v and v['value'] and v['value'] > 0:
+            h_y[i] = h_y[j] + v['value'] if i < j else h_y[j] - v['value']
+            print(f"  Y: H[{j}]→H[{i}] (uzupełnienie) V(val={v['value']}) → y={h_y[i]}")
+            break
+
+# Fallback: jeśli nadal brak pozycji
+for i in range(n_v):
+    if v_x[i] is None:
+        v_x[i] = v_x[i - 1] + 100 if i > 0 and v_x[i - 1] is not None else 0
+        print(f"  UWAGA: V[{i}] brak dimension_value, fallback x={v_x[i]}")
+for i in range(n_h):
+    if h_y[i] is None:
+        h_y[i] = h_y[i + 1] + 100 if i < n_h - 1 and h_y[i + 1] is not None else 0
+        print(f"  UWAGA: H[{i}] brak dimension_value, fallback y={h_y[i]}")
+
+print(f"\nPozycje DXF — V walls x: {[f'{x:.1f}' for x in v_x]}")
+print(f"Pozycje DXF — H walls y: {[f'{y:.1f}' for y in h_y]}")
+
+# --- Rysowanie ścian ---
+for hi, hw in enumerate(h_walls_list):
+    left_vi = find_v_at_h_endpoint(hw, 'left')
+    right_vi = find_v_at_h_endpoint(hw, 'right')
+    x1 = v_x[left_vi] if left_vi is not None else 0
+    x2 = v_x[right_vi] if right_vi is not None else v_x[-1]
+    y = h_y[hi]
+    msp.add_line((x1, y), (x2, y))
+    print(f"  DXF H: ({x1:.1f}, {y:.1f}) → ({x2:.1f}, {y:.1f})  [długość={abs(x2-x1):.1f}]")
+
+for vi, vw in enumerate(v_walls_list):
+    top_hi = find_h_at_v_endpoint(vw, 'top')
+    bottom_hi = find_h_at_v_endpoint(vw, 'bottom')
+    x = v_x[vi]
+    y1 = h_y[bottom_hi] if bottom_hi is not None else 0
+    y2 = h_y[top_hi] if top_hi is not None else h_y[0]
+    msp.add_line((x, y1), (x, y2))
+    print(f"  DXF V: ({x:.1f}, {y1:.1f}) → ({x:.1f}, {y2:.1f})  [długość={abs(y2-y1):.1f}]")
 
 dxf_path = 'rzut.dxf'
 doc.saveas(dxf_path)
-print(f"Zapisano {len(h_walls) + len(v_walls)} ścian do {dxf_path} ({len(unmatched_pairs)} syntetycznych)")
+print(f"\nZapisano {n_v + n_h} ścian do {dxf_path}")
